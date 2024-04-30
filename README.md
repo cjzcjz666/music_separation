@@ -53,19 +53,34 @@ musdbconvert path/to/musdb-stems-root path/to/new/musdb-wav-root
 To train a Wave-U-Net, the basic command to use is
 
 ```
-python train.py --dataset_dir /PATH/TO/MUSDB18HQ 
+python train.py --dataset_dir /PATH/TO/MUSDB18
 ```
 where the path to MUSDB18_wav dataset needs to be specified, which contains the ``train`` and ``test`` subfolders.
 
-Add more command line parameters as needed:
-* ``--cuda`` to activate GPU usage
-* ``--checkpoint_dir`` and ``--log_dir`` to specify where checkpoint files and logs are saved/loaded
-* ``--load_model checkpoints/model_name/checkpoint_X`` to start training with weights given by a certain checkpoint
+Use TensorBoard to view the training and validation loss:
+```
+tensorboard --logdir path/to/log_directory
+```
 
-For more config options, see ``mytrain.py``.
+Add more command line parameters as needed:
+* ``--gpu`` to activate GPU usage
+* ``--checkpoint`` and ``--log_dir`` to specify where checkpoint files and logs are saved/loaded
+* ``--pretrained checkpoints/model_name/checkpoint_X`` to start training with weights given by a certain checkpoint
+
+For more config options, see ``train.py``.
 
 Training progress can be monitored by using Tensorboard on the respective ``log_dir``.
-After training, the model is evaluated on the MUSDB18HQ test set, and SDR/SIR/SAR metrics are reported for all instruments and written into both the Tensorboard, and in more detail also into a ``results.pkl`` file in the ``checkpoint_dir``
+
+Features:
+GPU support for training
+Configurable hyperparameters (batch size, epochs, learning rate, etc.)
+Early stopping functionality
+Support for L1 or MSE loss functions
+L2 regularization
+Cosine annealing learning rate scheduler
+Support for pre-trained models and checkpoints
+Spectral loss as an additional loss
+TensorBoard logging for training and validation loss
 
 # <a name="test"></a> Test trained models on songs!
 
