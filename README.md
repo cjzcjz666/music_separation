@@ -82,23 +82,19 @@ Other features:
 
 We provide the default model in a pre-trained form as download so you can separate your own songs right away.
 
-## Downloading our pretrained models
-
-Download our pretrained model [here](https://www.dropbox.com/s/r374hce896g4xlj/models.7z?dl=1).
-Extract the archive into the ``checkpoints`` subfolder in this repository, so that you have one subfolder for each model (e.g. ``REPO/checkpoints/waveunet``)
 
 ## Run pretrained model
 
 To apply our pretrained model to any of your own songs, simply point to its audio file path using the ``input_path`` parameter:
 
 ```
-python predict.py --load_model checkpoints/waveunet/model --input "audio_examples/Cristina Vane - So Easy/mix.mp3"
+python inference.py --input "../musdb18_wav/test/Al James - Schoolboy Facination/mixture.wav" --model model/best_model.pt
 ```
 
-* Add ``--cuda `` when using a GPU, it should be much quicker
+* Add ``--gpu `` when using a GPU, it should be much quicker
 * Point ``--input`` to the music file you want to separate
 
 By default, output is written where the input music file is located, using the original file name plus the instrument name as output file name. Use ``--output`` to customise the output directory.
 
 To run your own model:
-* Point ``--load_model`` to the checkpoint file of the model you are using. If you used non-default hyper-parameters to train your own model, you must specify them here again so the correct model is set up and can receive the weights!
+* Point ``--model`` to the checkpoint file of the model you are using. If you used non-default hyper-parameters to train your own model, you must specify them here again so the correct model is set up and can receive the weights!
