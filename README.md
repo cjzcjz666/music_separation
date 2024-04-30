@@ -15,7 +15,7 @@ System requirements:
 
 Clone the repository:
 ```
-https://github.com/cjzcjz666/music——separation.git
+https://github.com/cjzcjz666/music_separation.git
 ```
 
 Recommended: Create a new virtual environment to install the required Python packages into, then activate the virtual environment:
@@ -53,13 +53,12 @@ musdbconvert path/to/musdb-stems-root path/to/new/musdb-wav-root
 To train a Wave-U-Net, the basic command to use is
 
 ```
-python mytrain.py --dataset_dir /PATH/TO/MUSDB18HQ 
+python train.py --dataset_dir /PATH/TO/MUSDB18HQ 
 ```
-where the path to MUSDB18HQ dataset needs to be specified, which contains the ``train`` and ``test`` subfolders.
+where the path to MUSDB18_wav dataset needs to be specified, which contains the ``train`` and ``test`` subfolders.
 
 Add more command line parameters as needed:
 * ``--cuda`` to activate GPU usage
-* ``--hdf_dir PATH`` to save the preprocessed data (HDF files) to custom location PATH, instead of the default ``hdf`` subfolder in this repository
 * ``--checkpoint_dir`` and ``--log_dir`` to specify where checkpoint files and logs are saved/loaded
 * ``--load_model checkpoints/model_name/checkpoint_X`` to start training with weights given by a certain checkpoint
 
