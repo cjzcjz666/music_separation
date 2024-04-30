@@ -71,16 +71,12 @@ For more config options, see ``train.py``.
 
 Training progress can be monitored by using Tensorboard on the respective ``log_dir``.
 
-Features:
-GPU support for training
-Configurable hyperparameters (batch size, epochs, learning rate, etc.)
-Early stopping functionality
-Support for L1 or MSE loss functions
-L2 regularization
-Cosine annealing learning rate scheduler
-Support for pre-trained models and checkpoints
-Spectral loss as an additional loss
-TensorBoard logging for training and validation loss
+Other features:
+* Early stopping functionality
+* Support for L1 or MSE loss functions
+* L2 regularization
+* Cosine annealing learning rate scheduler
+* Spectral loss as an additional loss
 
 # <a name="test"></a> Test trained models on songs!
 
