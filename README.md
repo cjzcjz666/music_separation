@@ -98,3 +98,9 @@ By default, output is written where the input music file is located, using the o
 
 To run your own model:
 * Point ``--model`` to the checkpoint file of the model you are using. If you used non-default hyper-parameters to train your own model, you must specify them here again so the correct model is set up and can receive the weights!
+
+## Run evaluate model
+
+```
+python evaluate.py ./evaluate.py --input_dir ../musdb18_wav/test --model model/best_model.pt
+```
