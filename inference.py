@@ -6,7 +6,7 @@ import soundfile as sf
 import torch
 from models.unet import UNet
 from data.preprocess import to_mag
-from config import WINDOW_SIZE, HOP_LENGTH, SAMPLING_RATE, SEGMENT_SIZE
+from config import WINDOW_SIZE, HOP_LENGTH, SAMPLING_RATE, SEGMENT_SIZE, DEVICE
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Music Source Separation Inference')
@@ -19,41 +19,76 @@ def parse_args():
 def load_audio(file):
     print("file", file)
     if file.endswith('.wav'):
-        wav, _ = librosa.load(file, sr=SAMPLING_RATE)
-        spec = librosa.stft(wav, n_fft=WINDOW_SIZE, hop_length=HOP_LENGTH)
-        mag = np.abs(spec)
-        return torch.from_numpy(spec).unsqueeze(0), torch.from_numpy(mag).unsqueeze(0)
+        # wav, _ = librosa.load(file, sr=SAMPLING_RATE)
+        wav, _ = librosa.load(file, sr=SAMPLING_RATE, mono=True)
+        window = torch.hann_window(WINDOW_SIZE, device=DEVICE)
+        wav_tensor = torch.from_numpy(wav).to(DEVICE)
+        spectrogram = torch.stft(wav_tensor, n_fft=WINDOW_SIZE, window=window)
+        spec = spectrogram.pow(2).sum(-1).sqrt()
+        # spec = librosa.stft(wav, n_fft=WINDOW_SIZE, hop_length=HOP_LENGTH)
+        # mag = np.abs(spec)
+        spec = spec.cpu().numpy().astype(np.float32)
+        return torch.from_numpy(spec)
     elif file.endswith('.npz'):
         data = np.load(file)
         return data['mix']
     else:
         raise ValueError(f'Unsupported file format: {file}')
 
-def separate(model, mix_spec, mix_mag, segment_size):
+def separate(model, mix_spec):
     # Pad the input to ensure it's a multiple of segment_size
-    mix_length = mix_mag.size(-1)
-    padding = segment_size - mix_length % segment_size
-    mix_mag = torch.nn.functional.pad(mix_mag, (0, padding))
-    # print("mix_mag.shape:", mix_mag.shape)
-    # Split the input into segments
-    # mix_segments = mix_mag.unfold(2, segment_size, segment_size).permute(2, 0, 1, 3)
-    mix_segments = mix_mag.unfold(-1, segment_size, segment_size).permute(2, 0, 1, 3)
-    # print("mix_segments", mix_segments.shape)
+    # mix_length = mix_mag.size(-1)
+    # padding = segment_size - mix_length % segment_size
+    # mix_mag = torch.nn.functional.pad(mix_mag, (0, padding))
+    # # print("mix_mag.shape:", mix_mag.shape)
+    # # Split the input into segments
+    # # mix_segments = mix_mag.unfold(2, segment_size, segment_size).permute(2, 0, 1, 3)
+    # mix_segments = mix_mag.unfold(-1, segment_size, segment_size).permute(2, 0, 1, 3)
+    # # print("mix_segments", mix_segments.shape)
     
-    # Process each segment
-    output_segments = []
-    for mix_segment in mix_segments:
-        with torch.no_grad():
-            mix_segment = mix_segment.unsqueeze(1)
-            # print("mix_segment.shape:", mix_segment.shape)
-            output_segment = model(mix_segment)
-        output_segments.append(output_segment)
+    # # Process each segment
+    # output_segments = []
+    # for mix_segment in mix_segments:
+    #     with torch.no_grad():
+    #         mix_segment = mix_segment.unsqueeze(1)
+    #         # print("mix_segment.shape:", mix_segment.shape)
+    #         output_segment = model(mix_segment)
+    #     output_segments.append(output_segment)
     
-    # Reconstruct the output
-    output = torch.cat(output_segments, dim=-1)
-    output = output[..., :mix_length]  # Remove padding
+    # # Reconstruct the output
+    # output = torch.cat(output_segments, dim=-1)
+    # output = output[..., :mix_length]  # Remove padding
+
+    mix_padded, (left, right) = padding(mix_spec, 64)
+    right = mix_padded.size(-1) - right
+        
+    # Add batch dimension and channel dimension
+    input_new = mix_padded.unsqueeze(0).unsqueeze(0)
+        
+    # Process the padded input
+    output = model(input_new)
+        
+    # Remove padding
+     output = output[..., left:right]
     
     return output
+
+def padding(signal, pad_multiple):
+    """Apply padding to ensure that the number of time frames of `signal` is a multiple of `pad_multiple`.
+    Args:
+        signal (torch.Tensor): Signal to be padded.
+        pad_multiple (int): Desired multiple of the padded signal length.
+    Returns:
+        Tuple[torch.Tensor, Tuple[int, int]]: Padded signal and the number of frames padded to the left and right sides, respectively.
+    """
+    n_frames = signal.size(-1)
+    n_pad = (pad_multiple - n_frames % pad_multiple) % pad_multiple
+    if n_pad:
+        left = n_pad // 2
+        right = n_pad - left
+        return torch.nn.functional.pad(signal, (left, right)), (left, right)
+    else:
+        return signal, (0, 0)
 
 def save_audio(output, mix_spec, output_dir):
     sources = ['bass', 'drums', 'other', 'vocals']
@@ -78,7 +113,7 @@ def save_audio(output, mix_spec, output_dir):
 
     for i, source in enumerate(sources):
         # print("len", output.shape[-1]*HOP_LENGTH)
-        source_wav = torch.istft(separated[i], WINDOW_SIZE, window=window, hop_length=HOP_LENGTH, length=output.shape[-1]*HOP_LENGTH)
+        source_wav = torch.istft(separated[i], WINDOW_SIZE, window=window, length=output.shape[-1]*HOP_LENGTH)
         # source_spec = output[i].unsqueeze(-1) * torch.exp(1j * mix_phase)
         # source_wav = torch.istft(source_spec.squeeze(0), n_fft=WINDOW_SIZE, hop_length=HOP_LENGTH, length=output.shape[-1]*HOP_LENGTH)
         source_wav = source_wav.cpu().numpy()
@@ -102,10 +137,10 @@ def main(args):
     os.makedirs(args.output, exist_ok=True)
     
     for file in files:
-        mix_spec, mix_mag = load_audio(file)
+        mix_spec = load_audio(file)
         mix_spec = mix_spec.to(DEVICE)
-        mix_mag = mix_mag.to(DEVICE)
-        output = separate(model, mix_spec, mix_mag, SEGMENT_SIZE)
+        # mix_mag = mix_mag.to(DEVICE)
+        output = separate(model, mix_spec)
         save_audio(output, mix_spec, args.output)
 
 if __name__ == '__main__':
