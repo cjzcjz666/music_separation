@@ -1,194 +1,154 @@
 import argparse
 import os
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-from data.dataset import MusicDataset
-from models.unet import UNet
-from config import DEVICE
-from torch.optim.lr_scheduler import CosineAnnealingLR
-from datetime import datetime
-from utils.loss import SpectralLoss
-from config import WINDOW_SIZE, HOP_LENGTH, SAMPLING_RATE, SEGMENT_SIZE
-from utils.pad import padding
+import torch
+import torch.nn.functional as F
+import torch.utils.data
+from torch.utils.tensorboard import SummaryWriter
 
-def parse_args():
-    parser = argparse.ArgumentParser(description='Music Source Separation')
-    parser.add_argument('--gpu', action='store_true', help='Use GPU for training')
-    parser.add_argument('--gpu_ids', type=str, default='0', help='GPU IDs to use')
-    parser.add_argument('--batch_size', type=int, default=16, help='Batch size')
-    parser.add_argument('--epochs', type=int, default=300, help='Number of epochs')
-    parser.add_argument('--early_stopping', type=int, default=20, help='Early stopping patience')
-    parser.add_argument('--dataset', type=str, default='../musdb18_wav/train', help='Dataset directory')
-    parser.add_argument('--log_dir', type=str, default='./logs', help='Log directory for TensorBoard')
-    parser.add_argument('--model_dir', type=str, default='./model', help='Model directory')
-    parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
-    parser.add_argument('--loss', type=str, default='l1', choices=['mse', 'l1'], help='Loss function')
-    parser.add_argument('--l2_reg', type=float, default=0, help='L2 regularization weight')
-    parser.add_argument('--use_cosine_annealing', action='store_true', help='Use cosine annealing learning rate scheduler')
-    # parser.add_argument('--segment_size', type=int, default=2048, help='Segment size')
-    parser.add_argument('--pretrained', type=str, default=None, help='Path to pretrained model')
-    parser.add_argument('--checkpoint', type=str, default=None, help='Path to checkpoint')
-    parser.add_argument('--use_spectral_loss', action='store_true', help='Use spectral loss in addition to the main loss')
-    parser.add_argument('--spectral_loss_weight', type=float, default=0.1, help='Weight for the spectral loss')
-    return parser.parse_args()
+import data
+from u_net import UNet, padding
 
-# def train(args, model, dataloader, loss_fn, spectral_loss_fn, optimizer, scheduler, writer):
-def train(args, model, train_loader, test_loader, loss_fn, spectral_loss_fn, optimizer, scheduler, writer):
-    best_loss = float('inf')
-    early_stop_counter = 0
+N_PART = 4
+N_FFT = 2047
+SAMPLING_RATE = 22050
 
-    for epoch in range(args.epochs):
-        model.train()
-        avg_loss = 0.0
+
+def train(model, data_loader, optimizer, device, epoch, tb_writer):
+    model.train()
+    total_loss = 0
+    progress_bar = tqdm(data_loader, desc=f"Epoch {epoch}")
+    
+    for x, t in progress_bar:
+        batch_size = x.size(0)
+        x, t = x.to(device), t.to(device)
+
+        # print("x", x.shape)
+        # print("t", t.shape)
+
+        y = model(x) * x.unsqueeze(1)
+        # print("y", y.shape)
+        loss = F.l1_loss(y, t, reduction='sum') / batch_size
+        total_loss += loss.item()
         
-        with tqdm(total=len(train_loader), desc=f"Epoch {epoch + 1}/{args.epochs}", unit='batch') as pbar:
-            for i, (x_batch, y_batch) in enumerate(train_loader):
-                optimizer.zero_grad()
-                x_batch = x_batch.to(DEVICE)
-                x_batch = x_batch.unsqueeze(1)
-                y_batch = y_batch.to(DEVICE)
-            
-                # print("x_batch", x_batch.shape)
-                # print("y_batch", y_batch.shape)
-
-                y_pred = model(x_batch)
-
-                # print("y_batch", y_batch.shape)
-                # print("y_pred", y_pred.shape)
-
-                loss = loss_fn(y_pred, y_batch)
-
-                l2_reg_loss = 0
-                for param in model.parameters():
-                    l2_reg_loss += torch.norm(param)
-                loss += args.l2_reg * l2_reg_loss
-
-                if args.use_spectral_loss:
-                    print("use spectral_loss")
-                    spectral_loss = spectral_loss_fn(y_pred, y_batch)
-                    loss += args.spectral_loss_weight * spectral_loss
-
-                avg_loss += loss.item()
-            
-                loss.backward()
-                optimizer.step()
-
-                if args.use_cosine_annealing:
-                    scheduler.step()
-
-                pbar.update(1)
-                pbar.set_postfix({'loss': loss.item()})
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
         
-        avg_loss /= len(train_loader)
-        test_loss = test(model, test_loader, SEGMENT_SIZE, loss_fn)
-        
-        writer.add_scalar('Loss/train', avg_loss, epoch)
-        print(f'Epoch {epoch+1}: Train Loss = {avg_loss}')
+        progress_bar.set_postfix({'loss': loss.item()})
+    
+    tb_writer.add_scalar('train/loss', total_loss / len(data_loader), epoch)
 
-        writer.add_scalar('Loss/test', test_loss, epoch)
-        print(f'Epoch {epoch+1}: Test Loss = {test_loss}')
-        
-        if test_loss < best_loss:
-            best_loss = test_loss
-            early_stop_counter = 0
-            torch.save(model.state_dict(), os.path.join(model_dir, 'best_model.pt'))
-        else:
-            early_stop_counter += 1
-            if early_stop_counter >= args.early_stopping:
-                print(f'Early stopping at epoch {epoch}')
-                break
-        
-        torch.save(model.state_dict(), os.path.join(model_dir, 'latest_model.pt'))
 
-def test(model, test_loader, segment_size, loss_fn):
+def test(model, test_data, device, epoch, tb_writer):
     model.eval()
-    test_loss = 0.0
+
+    total_loss = 0
     with torch.no_grad():
-        for mix, target in test_loader:
-            mix = mix.to(DEVICE)
-            target = target.to(DEVICE)
-            # print("target", target.shape)
-            # print("mix", mix.shape)
+        window = torch.hann_window(N_FFT, device=device)
+        for sound in test_data:
+            sound = sound.to(device)
+            sound_stft = torch.stft(sound, N_FFT, window=window)
+            sound_spec = sound_stft.pow(2).sum(-1).sqrt()
+            x, t = sound_spec[0], sound_spec[1:]
 
-            # Pad the input to ensure it's a multiple of 64
-            mix_padded, (left, right) = padding(mix, 64)
+            # print("x", x.shape)
 
-            # print("mix_padded", mix_padded.shape)
-            # target_padded, _ = padding(target, 64)
-            right = mix_padded.size(-1) - right
-            
-            input_new = mix_padded.unsqueeze(0)
+            x_padded, (left, right) = padding(x)
+
+            # print("x_padded", x_padded.shape)
+
+            right = x_padded.size(1) - right
+
+            input_new = x_padded.unsqueeze(0)
             # print("input", input_new.shape)
 
-            # Process the padded input
-            output = model(input_new)
-            # print("output1", output.shape)
-            output = output[..., left:right]
+            mask = model(x_padded.unsqueeze(0)).squeeze(0)[:, :, left:right]
+            y = mask * x.unsqueeze(0)
+            loss = F.l1_loss(y, t, reduction='sum')
+            total_loss += loss.item()
 
-            # print("output2", output.shape)
-            # print("target_padded", target_padded.shape)
-            
-            loss = loss_fn(output, target)
-            test_loss += loss.item()
-    
-    test_loss /= len(test_loader)
-    return test_loss
+    # TODO: Also evaluate separation performance
+    tb_writer.add_scalar('test/loss', total_loss / len(test_data), epoch)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Train U-Net with MUSDB18 dataset.',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--dataset',
+                        help='Path of dataset which converted to .wav format '
+                             'by `convert_to_wav.py`.',
+                        type=str, metavar='PATH', required=True)
+    parser.add_argument('--batch-size', '-b',
+                        help='Batch size',
+                        type=int, default=64)
+    parser.add_argument('--epochs', '-e',
+                        help='Number of epochs',
+                        type=int, default=500)
+    parser.add_argument('--output-interval',
+                        help='Save model per N epochs',
+                        type=int, metavar='N', default=1)
+    parser.add_argument('--eval-interval',
+                        help='Evaluate and save model per N epochs',
+                        type=int, metavar='N', default=25)
+    parser.add_argument('--gpu', '-g',
+                        help='GPU id (Negative number indicates CPU)',
+                        type=int, nargs='+', metavar='ID', default=[0])
+    parser.add_argument('--learning-rate', '-l',
+                        help='Learning rate',
+                        type=float, metavar='LR', default=2e-3)
+    parser.add_argument('--no-cuda',
+                        help='Do not use GPU',
+                        action='store_true')
+    parser.add_argument('--output',
+                        help='Save model to PATH',
+                        type=str, metavar='PATH', default='./models')
+    args = parser.parse_args()
+
+    if not os.path.isdir(args.output):
+        os.mkdir(args.output)
+
+    if_use_cuda = torch.cuda.is_available() and not args.no_cuda
+    if if_use_cuda:
+        torch.backends.cudnn.benchmark = True
+    device = torch.device(f'cuda:{args.gpu[0]}' if if_use_cuda else 'cpu')
+
+    model = UNet(N_PART)
+    if not args.no_cuda and len(args.gpu) > 1:
+        model = torch.nn.DataParallel(model, device_ids=args.gpu)
+    model = model.to(device)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
+
+    # Dataloader
+    train_data, test_data =\
+        data.read_data(args.dataset, N_FFT, 512, SAMPLING_RATE)
+    train_dataset = data.RandomCropDataset(train_data, 256)
+    print("train_dataset", len(train_dataset))
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset, args.batch_size, shuffle=True,
+        num_workers=2, pin_memory=False)
+
+    # Tensorboard
+    tb_writer = SummaryWriter()
+
+    for epoch in range(1, args.epochs + 1):
+        train(model, train_loader, optimizer, device, epoch, tb_writer)
+        if epoch % args.output_interval == 0:
+            # Save the model
+            test(model, test_data, device, epoch, tb_writer)
+            model.cpu()
+            if isinstance(model, torch.nn.DataParallel):
+                state_dict = model.module.state_dict()
+            else:
+                state_dict = model.state_dict()
+            path = os.path.join(args.output, f'model-{epoch}.pth')
+            torch.save(state_dict, path)
+            model.to(device)
+
+    tb_writer.close()
+
 
 if __name__ == '__main__':
-    args = parse_args()
-    
-    current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_dir = os.path.join(args.log_dir, current_time)
-    model_dir = os.path.join(args.model_dir, current_time)
-    os.makedirs(log_dir, exist_ok=True)
-    os.makedirs(model_dir, exist_ok=True)
-    writer = SummaryWriter(log_dir=log_dir)
-    
-    if args.gpu:
-        os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu_ids
-        DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        if torch.cuda.device_count() > 1:
-            model = nn.DataParallel(model)
-    
-    # dataset = MusicDataset(args.dataset, SEGMENT_SIZE, 256)
-
-    train_dir = os.path.join(args.dataset, 'train') 
-    test_dir = os.path.join(args.dataset, 'test')
-
-    train_dataset = MusicDataset(train_dir, SEGMENT_SIZE, 256, is_train=True)
-    test_dataset = MusicDataset(test_dir, SEGMENT_SIZE, 256, is_train=False)
-
-    print("train_dataset", len(train_dataset))
-
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
-    
-    model = UNet(in_channels=1, out_channels=4).to(DEVICE)
-    
-    if args.pretrained:
-        model.load_state_dict(torch.load(args.pretrained))
-    
-    if args.checkpoint:
-        model.load_state_dict(torch.load(args.checkpoint))
-    
-    if args.loss == 'mse':
-        loss_fn = nn.MSELoss()
-    elif args.loss == 'l1':
-        loss_fn = nn.L1Loss()
-    
-    spectral_loss_fn = SpectralLoss()
-
-    # optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.l2_reg)
-    
-    # train(args, model, dataloader, loss_fn, optimizer, writer)
-    scheduler = None
-    if args.use_cosine_annealing:
-        scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
-    
-    train(args, model, train_loader, test_loader, loss_fn, spectral_loss_fn, optimizer, scheduler, writer)
-    
-    writer.close()
+    main()
