@@ -7,6 +7,7 @@ import torch
 from models.unet import UNet
 from data.preprocess import to_mag
 from config import WINDOW_SIZE, HOP_LENGTH, SAMPLING_RATE, SEGMENT_SIZE, DEVICE
+from utils.pad import padding
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Music Source Separation Inference')
@@ -23,12 +24,13 @@ def load_audio(file):
         wav, _ = librosa.load(file, sr=SAMPLING_RATE, mono=True)
         window = torch.hann_window(WINDOW_SIZE, device=DEVICE)
         wav_tensor = torch.from_numpy(wav).to(DEVICE)
+        length = wav_tensor.size(-1)
         spectrogram = torch.stft(wav_tensor, n_fft=WINDOW_SIZE, window=window)
         spec = spectrogram.pow(2).sum(-1).sqrt()
         # spec = librosa.stft(wav, n_fft=WINDOW_SIZE, hop_length=HOP_LENGTH)
         # mag = np.abs(spec)
         spec = spec.cpu().numpy().astype(np.float32)
-        return torch.from_numpy(spec)
+        return torch.from_numpy(spec), spectrogram, length
     elif file.endswith('.npz'):
         data = np.load(file)
         return data['mix']
@@ -36,84 +38,39 @@ def load_audio(file):
         raise ValueError(f'Unsupported file format: {file}')
 
 def separate(model, mix_spec):
-    # Pad the input to ensure it's a multiple of segment_size
-    # mix_length = mix_mag.size(-1)
-    # padding = segment_size - mix_length % segment_size
-    # mix_mag = torch.nn.functional.pad(mix_mag, (0, padding))
-    # # print("mix_mag.shape:", mix_mag.shape)
-    # # Split the input into segments
-    # # mix_segments = mix_mag.unfold(2, segment_size, segment_size).permute(2, 0, 1, 3)
-    # mix_segments = mix_mag.unfold(-1, segment_size, segment_size).permute(2, 0, 1, 3)
-    # # print("mix_segments", mix_segments.shape)
-    
-    # # Process each segment
-    # output_segments = []
-    # for mix_segment in mix_segments:
-    #     with torch.no_grad():
-    #         mix_segment = mix_segment.unsqueeze(1)
-    #         # print("mix_segment.shape:", mix_segment.shape)
-    #         output_segment = model(mix_segment)
-    #     output_segments.append(output_segment)
-    
-    # # Reconstruct the output
-    # output = torch.cat(output_segments, dim=-1)
-    # output = output[..., :mix_length]  # Remove padding
+    model.eval()
 
-    mix_padded, (left, right) = padding(mix_spec, 64)
-    right = mix_padded.size(-1) - right
+    with torch.no_grad():
+        mix_padded, (left, right) = padding(mix_spec, 64)    # mix_spec [1024, 8645]   mix_padding [1024,8704]
+        right = mix_padded.size(-1) - right
         
-    # Add batch dimension and channel dimension
-    input_new = mix_padded.unsqueeze(0).unsqueeze(0)
+        # Add batch dimension and channel dimension
+        input_new = mix_padded.unsqueeze(0).unsqueeze(0)  # [1,1,1024,8704]
         
-    # Process the padded input
-    output = model(input_new)
+        # Process the padded input
+        output = model(input_new)  # [1,4,1024,8704]
         
-    # Remove padding
-     output = output[..., left:right]
+        # Remove padding
+        output = output[..., left:right]  # [1,4,1024,8645]
     
-    return output
+        return output
 
-def padding(signal, pad_multiple):
-    """Apply padding to ensure that the number of time frames of `signal` is a multiple of `pad_multiple`.
-    Args:
-        signal (torch.Tensor): Signal to be padded.
-        pad_multiple (int): Desired multiple of the padded signal length.
-    Returns:
-        Tuple[torch.Tensor, Tuple[int, int]]: Padded signal and the number of frames padded to the left and right sides, respectively.
-    """
-    n_frames = signal.size(-1)
-    n_pad = (pad_multiple - n_frames % pad_multiple) % pad_multiple
-    if n_pad:
-        left = n_pad // 2
-        right = n_pad - left
-        return torch.nn.functional.pad(signal, (left, right)), (left, right)
-    else:
-        return signal, (0, 0)
-
-def save_audio(output, mix_spec, output_dir):
+def save_audio(output, mix_spec, spectrogram, length, output_dir):
     sources = ['bass', 'drums', 'other', 'vocals']
     mix_phase = torch.angle(mix_spec)
 
     mask = output.squeeze(0)
-    # print("mask", mask.shape)
-    # print("output", output.shape)
-    # print("mix_phase", mix_phase.shape)
-    # print("mix_spec", mix_spec.shape)
 
-    mix_spec_real = mix_spec.real
-    mix_spec_imag = mix_spec.imag
-    mix_spec_complex = torch.stack([mix_spec_real, mix_spec_imag], dim=-1)
-    # print("mix_spec_complex", mix_spec_complex.shape)
-    
-    separated = mask.unsqueeze(3) * mix_spec_complex.unsqueeze(0)
+    separated = mask.unsqueeze(3).to(DEVICE) * spectrogram.unsqueeze(0)
     separated = separated.squeeze(0)
     # print("separated", separated.shape)
-
-    window = torch.hann_window(WINDOW_SIZE, device='cpu')
-
+    window = torch.hann_window(WINDOW_SIZE, device=DEVICE)
+    
     for i, source in enumerate(sources):
         # print("len", output.shape[-1]*HOP_LENGTH)
-        source_wav = torch.istft(separated[i], WINDOW_SIZE, window=window, length=output.shape[-1]*HOP_LENGTH)
+        # import pdb;
+        # pdb.set_trace()
+        source_wav = torch.istft(separated[i], WINDOW_SIZE, window=window, length=length)
         # source_spec = output[i].unsqueeze(-1) * torch.exp(1j * mix_phase)
         # source_wav = torch.istft(source_spec.squeeze(0), n_fft=WINDOW_SIZE, hop_length=HOP_LENGTH, length=output.shape[-1]*HOP_LENGTH)
         source_wav = source_wav.cpu().numpy()
@@ -124,11 +81,9 @@ def main(args):
         DEVICE = torch.device('cuda')
     else:
         DEVICE = torch.device('cpu')
-    
+        
     model = UNet(in_channels=1, out_channels=4)
     model.load_state_dict(torch.load(args.model, map_location=DEVICE))
-    model.eval()
-    
     if os.path.isdir(args.input):
         files = [os.path.join(args.input, f) for f in os.listdir(args.input)]
     else:
@@ -137,11 +92,11 @@ def main(args):
     os.makedirs(args.output, exist_ok=True)
     
     for file in files:
-        mix_spec = load_audio(file)
+        mix_spec, spectrogram, length = load_audio(file)
         mix_spec = mix_spec.to(DEVICE)
         # mix_mag = mix_mag.to(DEVICE)
         output = separate(model, mix_spec)
-        save_audio(output, mix_spec, args.output)
+        save_audio(output, mix_spec, spectrogram, length, args.output)
 
 if __name__ == '__main__':
     args = parse_args()
