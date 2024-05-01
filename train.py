@@ -117,7 +117,7 @@ def test(model, test_loader, segment_size, loss_fn):
             mix_padded, (left, right) = padding(mix, 64)
 
             # print("mix_padded", mix_padded.shape)
-            target_padded, _ = padding(target, 64)
+            # target_padded, _ = padding(target, 64)
             right = mix_padded.size(-1) - right
             
             input_new = mix_padded.unsqueeze(0)
@@ -131,7 +131,7 @@ def test(model, test_loader, segment_size, loss_fn):
             # print("output2", output.shape)
             # print("target_padded", target_padded.shape)
             
-            loss = loss_fn(output, target_padded[..., left:right])
+            loss = loss_fn(output, target)
             test_loss += loss.item()
     
     test_loss /= len(test_loader)
