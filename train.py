@@ -102,43 +102,99 @@ def train(args, model, train_loader, test_loader, loss_fn, spectral_loss_fn, opt
         
         torch.save(model.state_dict(), os.path.join(model_dir, 'latest_model.pt'))
 
+# def test(model, test_loader, segment_size, loss_fn):
+#     model.eval()
+#     test_loss = 0.0
+#     with torch.no_grad():
+#         for mix, target in test_loader:
+#             mix = mix.to(DEVICE)
+#             # print("mix_old", mix.shape)
+#             target = target.to(DEVICE)
+            
+#             # Pad the input to ensure it's a multiple of segment_size
+#             mix_length = mix.size(-1)
+#             padding = segment_size - mix_length % segment_size
+#             mix = torch.nn.functional.pad(mix, (0, padding))
+#             target = torch.nn.functional.pad(target, (0, padding))  # Pad the last dimension
+            
+#             # Split the input into segments
+#             mix_segments = mix.unfold(2, segment_size, segment_size).permute(2, 0, 1, 3)
+            
+#             # Process each segment
+#             output_segments = []
+#             for mix_segment in mix_segments:
+#                 output_segment = model(mix_segment.unsqueeze(1))
+#                 output_segments.append(output_segment)
+            
+#             # Reconstruct the output
+#             output = torch.cat(output_segments, dim=-1)  # Concatenate along the last dimension
+#             output = output[..., :mix_length]  # Remove padding from the last dimension
+            
+#             # print("mix_new", mix.shape)
+#             # print("output", output.shape)
+#             # print("target", target.shape)
+            
+#             loss = loss_fn(output, target[..., :mix_length])  # Remove padding from target
+#             test_loss += loss.item()
+    
+#     test_loss /= len(test_loader)
+#     return test_loss
+
 def test(model, test_loader, segment_size, loss_fn):
     model.eval()
     test_loss = 0.0
     with torch.no_grad():
         for mix, target in test_loader:
             mix = mix.to(DEVICE)
-            # print("mix_old", mix.shape)
             target = target.to(DEVICE)
-            
-            # Pad the input to ensure it's a multiple of segment_size
-            mix_length = mix.size(-1)
-            padding = segment_size - mix_length % segment_size
-            mix = torch.nn.functional.pad(mix, (0, padding))
-            target = torch.nn.functional.pad(target, (0, padding))  # Pad the last dimension
-            
-            # Split the input into segments
-            mix_segments = mix.unfold(2, segment_size, segment_size).permute(2, 0, 1, 3)
-            
-            # Process each segment
-            output_segments = []
-            for mix_segment in mix_segments:
-                output_segment = model(mix_segment.unsqueeze(1))
-                output_segments.append(output_segment)
-            
-            # Reconstruct the output
-            output = torch.cat(output_segments, dim=-1)  # Concatenate along the last dimension
-            output = output[..., :mix_length]  # Remove padding from the last dimension
-            
-            # print("mix_new", mix.shape)
-            # print("output", output.shape)
             # print("target", target.shape)
+            # print("mix", mix.shape)
+
+            # Pad the input to ensure it's a multiple of 64
+            mix_padded, (left, right) = padding(mix, 64)
+
+            # print("mix_padded", mix_padded.shape)
+            target_padded, _ = padding(target, 64)
+            right = mix_padded.size(-1) - right
             
-            loss = loss_fn(output, target[..., :mix_length])  # Remove padding from target
+            input_new = mix_padded.unsqueeze(0)
+            # print("input", input_new.shape)
+
+            # Process the padded input
+            output = model(input_new)
+            # print("output1", output.shape)
+            output = output[..., left:right]
+
+            # print("output2", output.shape)
+            # print("target_padded", target_padded.shape)
+
+            # a = target_padded[..., left:right]
+            # print("a", a.shape)
+            
+            loss = loss_fn(output, target_padded[..., left:right])
             test_loss += loss.item()
     
     test_loss /= len(test_loader)
     return test_loss
+
+def padding(signal, pad_multiple):
+    """Apply padding to ensure that the number of time frames of `signal` is a multiple of `pad_multiple`.
+    
+    Args:
+        signal (torch.Tensor): Signal to be padded.
+        pad_multiple (int): Desired multiple of the padded signal length.
+        
+    Returns:
+        Tuple[torch.Tensor, Tuple[int, int]]: Padded signal and the number of frames padded to the left and right sides, respectively.
+    """
+    n_frames = signal.size(-1)
+    n_pad = (pad_multiple - n_frames % pad_multiple) % pad_multiple
+    if n_pad:
+        left = n_pad // 2
+        right = n_pad - left
+        return torch.nn.functional.pad(signal, (left, right)), (left, right)
+    else:
+        return signal, (0, 0)
 
 if __name__ == '__main__':
     args = parse_args()
